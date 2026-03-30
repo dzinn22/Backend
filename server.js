@@ -8,14 +8,13 @@ app.use(express.json({ limit: "15mb" }));
 
 const API_KEY = process.env.OPENAI_API_KEY;
 
-// Verificação da key
 if (!API_KEY) {
-  console.log("❌ ERRO: OPENAI_API_KEY não foi encontrada no .env");
+  console.log("❌ ERRO: OPENAI_API_KEY não foi encontrada no Render (.env).");
 }
 
-// =======================
-// 🧠 CHAT IA (GPT-4o-mini)
-// =======================
+/* =======================================================
+   🧠 CHAT NORMAL (resposta completa)
+======================================================= */
 app.post("/chat", async (req, res) => {
   try {
     const { messages } = req.body;
@@ -34,14 +33,13 @@ app.post("/chat", async (req, res) => {
       },
       body: JSON.stringify({
         model: "gpt-4o-mini",
-        messages: messages,
+        messages,
         temperature: 0.7
       })
     });
 
     const data = await response.json();
 
-    // Se OpenAI retornar erro
     if (!response.ok) {
       console.log("❌ ERRO OPENAI /chat:", data);
       return res.status(response.status).json({
@@ -52,11 +50,7 @@ app.post("/chat", async (req, res) => {
 
     const reply = data.choices?.[0]?.message?.content || "Sem resposta.";
 
-    // Retorno limpo pro frontend
-    res.json({
-      reply,
-      raw: data
-    });
+    res.json({ reply });
 
   } catch (err) {
     console.log("❌ ERRO SERVIDOR /chat:", err);
@@ -65,9 +59,104 @@ app.post("/chat", async (req, res) => {
 });
 
 
-// =======================
-// 🖼️ IA COM IMAGEM
-// =======================
+/* =======================================================
+   ⚡ CHAT STREAM (igual ChatGPT digitando)
+   Endpoint: POST /chat-stream
+   Resposta: SSE (text/event-stream)
+======================================================= */
+app.post("/chat-stream", async (req, res) => {
+  try {
+    const { messages } = req.body;
+
+    if (!messages || !Array.isArray(messages)) {
+      return res.status(400).json({
+        error: "Você precisa enviar { messages: [...] }"
+      });
+    }
+
+    // headers SSE
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+
+    // força enviar
+    res.flushHeaders?.();
+
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${API_KEY}`
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages,
+        temperature: 0.7,
+        stream: true
+      })
+    });
+
+    if (!response.ok) {
+      const errData = await response.json();
+      res.write(`data: ${JSON.stringify({ error: errData.error?.message || "Erro OpenAI" })}\n\n`);
+      res.write("data: [DONE]\n\n");
+      return res.end();
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+
+    let buffer = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (!line.startsWith("data:")) continue;
+
+        const dataStr = line.replace("data:", "").trim();
+
+        if (dataStr === "[DONE]") {
+          res.write("data: [DONE]\n\n");
+          res.end();
+          return;
+        }
+
+        try {
+          const json = JSON.parse(dataStr);
+          const token = json.choices?.[0]?.delta?.content;
+
+          if (token) {
+            res.write(`data: ${JSON.stringify({ token })}\n\n`);
+          }
+
+        } catch (e) {
+          // ignora erros de parse
+        }
+      }
+    }
+
+    res.write("data: [DONE]\n\n");
+    res.end();
+
+  } catch (err) {
+    console.log("❌ ERRO SERVIDOR /chat-stream:", err);
+    res.write(`data: ${JSON.stringify({ error: "Erro interno no servidor (stream)" })}\n\n`);
+    res.write("data: [DONE]\n\n");
+    res.end();
+  }
+});
+
+
+/* =======================================================
+   🖼️ IA COM IMAGEM
+======================================================= */
 app.post("/image", async (req, res) => {
   try {
     const { image } = req.body;
@@ -108,16 +197,12 @@ app.post("/image", async (req, res) => {
       });
     }
 
-    // Extrair resposta do responses API
     const reply =
       data.output?.[0]?.content?.find(c => c.type === "output_text")?.text ||
       data.output_text ||
       "Sem resposta.";
 
-    res.json({
-      reply,
-      raw: data
-    });
+    res.json({ reply });
 
   } catch (err) {
     console.log("❌ ERRO SERVIDOR /image:", err);
@@ -126,16 +211,16 @@ app.post("/image", async (req, res) => {
 });
 
 
-// =======================
-// 🔥 STATUS ONLINE
-// =======================
+/* =======================================================
+   🔥 STATUS ONLINE
+======================================================= */
 app.get("/", (req, res) => {
   res.send("🔥 ZR GPT API ONLINE");
 });
 
 
-// =======================
-// 🚀 START SERVER
-// =======================
+/* =======================================================
+   🚀 START SERVER
+======================================================= */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("🚀 rodando na porta " + PORT));
